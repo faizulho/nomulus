@@ -16,8 +16,6 @@ package google.registry.backup;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.truth.Truth.assertThat;
-import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
-import static google.registry.backup.RestoreCommitLogsActionTest.GCS_BUCKET;
 import static google.registry.backup.RestoreCommitLogsActionTest.createCheckpoint;
 import static google.registry.backup.RestoreCommitLogsActionTest.saveDiffFile;
 import static google.registry.backup.RestoreCommitLogsActionTest.saveDiffFileNotToRestore;
@@ -38,14 +36,15 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
-import com.google.appengine.tools.cloudstorage.GcsService;
-import com.google.appengine.tools.cloudstorage.GcsServiceFactory;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSortedMap;
 import com.google.common.truth.Truth8;
+import com.google.common.util.concurrent.MoreExecutors;
 import com.googlecode.objectify.Key;
+import google.registry.gcs.GcsUtils;
+import google.registry.gcs.backport.LocalStorageHelper;
 import google.registry.model.common.DatabaseMigrationStateSchedule;
 import google.registry.model.common.DatabaseMigrationStateSchedule.MigrationState;
 import google.registry.model.contact.ContactResource;
@@ -73,8 +72,10 @@ import google.registry.testing.FakeResponse;
 import google.registry.testing.TestObject;
 import google.registry.util.RequestStatusChecker;
 import java.io.IOException;
+import java.util.concurrent.Executors;
 import org.joda.time.DateTime;
 import org.joda.time.Duration;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -111,7 +112,7 @@ public class ReplayCommitLogsToSqlActionTest {
           .build();
 
   /** Local GCS service. */
-  private final GcsService gcsService = GcsServiceFactory.createGcsService();
+  private final GcsUtils gcsUtils = new GcsUtils(LocalStorageHelper.getOptions());
 
   private final ReplayCommitLogsToSqlAction action = new ReplayCommitLogsToSqlAction();
   private final FakeResponse response = new FakeResponse();
@@ -124,14 +125,15 @@ public class ReplayCommitLogsToSqlActionTest {
 
   @BeforeEach
   void beforeEach() {
-    action.gcsService = gcsService;
+    action.gcsUtils = gcsUtils;
     action.response = response;
     action.requestStatusChecker = requestStatusChecker;
     action.clock = fakeClock;
+    action.gcsBucket = "gcs bucket";
     action.diffLister = new GcsDiffFileLister();
-    action.diffLister.gcsService = gcsService;
-    action.diffLister.gcsBucket = GCS_BUCKET;
-    action.diffLister.executor = newDirectExecutorService();
+    action.diffLister.gcsUtils = gcsUtils;
+    action.diffLister.lazyExecutor = MoreExecutors::newDirectExecutorService;
+    action.diffLister.scheduledExecutorService = Executors.newSingleThreadScheduledExecutor();
     ofyTm()
         .transact(
             () ->
@@ -143,6 +145,11 @@ public class ReplayCommitLogsToSqlActionTest {
                         MigrationState.DATASTORE_PRIMARY)));
     TestObject.beforeSqlSaveCallCount = 0;
     TestObject.beforeSqlDeleteCallCount = 0;
+  }
+
+  @AfterEach
+  void afterEach() {
+    ofyTm().transact(() -> DatabaseMigrationStateSchedule.set(DEFAULT_TRANSITION_MAP.toValueMap()));
   }
 
   @Test
@@ -166,9 +173,9 @@ public class ReplayCommitLogsToSqlActionTest {
         CommitLogManifest.createKey(getBucketKey(2), now.minusMinutes(2));
     Key<CommitLogManifest> manifest2Key =
         CommitLogManifest.createKey(getBucketKey(1), now.minusMinutes(1));
-    saveDiffFileNotToRestore(gcsService, now.minusMinutes(2));
+    saveDiffFileNotToRestore(gcsUtils, now.minusMinutes(2));
     saveDiffFile(
-        gcsService,
+        gcsUtils,
         createCheckpoint(now.minusMinutes(1)),
         CommitLogManifest.create(
             getBucketKey(1),
@@ -183,7 +190,7 @@ public class ReplayCommitLogsToSqlActionTest {
         CommitLogMutation.create(manifest1bKey, TestObject.create("c")),
         CommitLogMutation.create(manifest1bKey, TestObject.create("d")));
     saveDiffFile(
-        gcsService,
+        gcsUtils,
         createCheckpoint(now),
         CommitLogManifest.create(
             getBucketKey(1),
@@ -201,8 +208,8 @@ public class ReplayCommitLogsToSqlActionTest {
   void testReplay_noManifests() throws Exception {
     DateTime now = fakeClock.nowUtc();
     jpaTm().transact(() -> jpaTm().insertWithoutBackup(TestObject.create("previous to keep")));
-    saveDiffFileNotToRestore(gcsService, now.minusMinutes(1));
-    saveDiffFile(gcsService, createCheckpoint(now.minusMillis(2)));
+    saveDiffFileNotToRestore(gcsUtils, now.minusMinutes(1));
+    saveDiffFile(gcsUtils, createCheckpoint(now.minusMillis(2)));
     jpaTm().transact(() -> SqlReplayCheckpoint.set(now.minusMillis(1)));
     runAndAssertSuccess(now.minusMillis(1));
     assertExpectedIds("previous to keep");
@@ -215,10 +222,10 @@ public class ReplayCommitLogsToSqlActionTest {
     jpaTm().transact(() -> jpaTm().insertWithoutBackup(TestObject.create("previous to keep")));
     Key<CommitLogBucket> bucketKey = getBucketKey(1);
     Key<CommitLogManifest> manifestKey = CommitLogManifest.createKey(bucketKey, now);
-    saveDiffFileNotToRestore(gcsService, now.minusMinutes(2));
+    saveDiffFileNotToRestore(gcsUtils, now.minusMinutes(2));
     jpaTm().transact(() -> SqlReplayCheckpoint.set(now.minusMinutes(1).minusMillis(1)));
     saveDiffFile(
-        gcsService,
+        gcsUtils,
         createCheckpoint(now.minusMinutes(1)),
         CommitLogManifest.create(bucketKey, now, null),
         CommitLogMutation.create(manifestKey, TestObject.create("a")),
@@ -238,10 +245,10 @@ public class ReplayCommitLogsToSqlActionTest {
     jpaTm().transact(() -> jpaTm().insertWithoutBackup(TestObject.create("previous to keep")));
     Key<CommitLogBucket> bucketKey = getBucketKey(1);
     Key<CommitLogManifest> manifestKey = CommitLogManifest.createKey(bucketKey, now);
-    saveDiffFileNotToRestore(gcsService, now.minusMinutes(2));
+    saveDiffFileNotToRestore(gcsUtils, now.minusMinutes(2));
     jpaTm().transact(() -> SqlReplayCheckpoint.set(now.minusMinutes(1).minusMillis(1)));
     saveDiffFile(
-        gcsService,
+        gcsUtils,
         createCheckpoint(now.minusMinutes(1)),
         CommitLogManifest.create(bucketKey, now, null),
         CommitLogMutation.create(manifestKey, TestObject.create("a")),
@@ -259,10 +266,10 @@ public class ReplayCommitLogsToSqlActionTest {
               jpaTm().insertWithoutBackup(TestObject.create("previous to keep"));
               jpaTm().insertWithoutBackup(TestObject.create("previous to delete"));
             });
-    saveDiffFileNotToRestore(gcsService, now.minusMinutes(2));
+    saveDiffFileNotToRestore(gcsUtils, now.minusMinutes(2));
     jpaTm().transact(() -> SqlReplayCheckpoint.set(now.minusMinutes(1).minusMillis(1)));
     saveDiffFile(
-        gcsService,
+        gcsUtils,
         createCheckpoint(now.minusMinutes(1)),
         CommitLogManifest.create(
             getBucketKey(1),
@@ -277,10 +284,10 @@ public class ReplayCommitLogsToSqlActionTest {
     DateTime now = fakeClock.nowUtc();
     jpaTm().transact(() -> jpaTm().put(TestObject.create("existing", "a")));
     Key<CommitLogManifest> manifestKey = CommitLogManifest.createKey(getBucketKey(1), now);
-    saveDiffFileNotToRestore(gcsService, now.minusMinutes(1).minusMillis(1));
+    saveDiffFileNotToRestore(gcsUtils, now.minusMinutes(1).minusMillis(1));
     jpaTm().transact(() -> SqlReplayCheckpoint.set(now.minusMinutes(1)));
     saveDiffFile(
-        gcsService,
+        gcsUtils,
         createCheckpoint(now.minusMillis(1)),
         CommitLogManifest.create(getBucketKey(1), now, null),
         CommitLogMutation.create(manifestKey, TestObject.create("existing", "b")));
@@ -295,10 +302,10 @@ public class ReplayCommitLogsToSqlActionTest {
   void testReplay_deleteMissingEntity() throws Exception {
     DateTime now = fakeClock.nowUtc();
     jpaTm().transact(() -> jpaTm().put(TestObject.create("previous to keep", "a")));
-    saveDiffFileNotToRestore(gcsService, now.minusMinutes(1).minusMillis(1));
+    saveDiffFileNotToRestore(gcsUtils, now.minusMinutes(1).minusMillis(1));
     jpaTm().transact(() -> SqlReplayCheckpoint.set(now.minusMinutes(1)));
     saveDiffFile(
-        gcsService,
+        gcsUtils,
         createCheckpoint(now.minusMillis(1)),
         CommitLogManifest.create(
             getBucketKey(1),
@@ -333,7 +340,7 @@ public class ReplayCommitLogsToSqlActionTest {
     TransactionManagerFactory.setJpaTm(() -> spy);
     // Save in the commit logs the domain and contact (in that order) and the token deletion
     saveDiffFile(
-        gcsService,
+        gcsUtils,
         createCheckpoint(now.minusMinutes(1)),
         CommitLogManifest.create(
             getBucketKey(1), now.minusMinutes(1), ImmutableSet.of(Key.create(toDelete))),
@@ -376,7 +383,7 @@ public class ReplayCommitLogsToSqlActionTest {
     TransactionManagerFactory.setJpaTm(() -> spy);
     // Save two commits -- the deletion, then the new version of the contact
     saveDiffFile(
-        gcsService,
+        gcsUtils,
         createCheckpoint(now.minusMinutes(1).plusMillis(1)),
         CommitLogManifest.create(
             getBucketKey(1), now.minusMinutes(1), ImmutableSet.of(Key.create(contact))),
@@ -416,7 +423,7 @@ public class ReplayCommitLogsToSqlActionTest {
             () -> {
               try {
                 saveDiffFile(
-                    gcsService,
+                    gcsUtils,
                     createCheckpoint(now.minusMinutes(1)),
                     CommitLogManifest.create(
                         getBucketKey(1), now.minusMinutes(1), ImmutableSet.of()),
@@ -445,7 +452,7 @@ public class ReplayCommitLogsToSqlActionTest {
     // Save a couple deletes that aren't propagated to SQL (the objects deleted are irrelevant)
     Key<ClaimsList> claimsListKey = Key.create(ClaimsList.class, 1L);
     saveDiffFile(
-        gcsService,
+        gcsUtils,
         createCheckpoint(now.minusMinutes(1)),
         CommitLogManifest.create(
             getBucketKey(1),
@@ -492,7 +499,7 @@ public class ReplayCommitLogsToSqlActionTest {
     Key<CommitLogManifest> manifestKey = CommitLogManifest.createKey(bucketKey, now);
     jpaTm().transact(() -> SqlReplayCheckpoint.set(now.minusMinutes(1).minusMillis(1)));
     saveDiffFile(
-        gcsService,
+        gcsUtils,
         createCheckpoint(now.minusMinutes(1)),
         CommitLogManifest.create(bucketKey, now, null),
         CommitLogMutation.create(manifestKey, TestObject.create("a")));
@@ -505,7 +512,7 @@ public class ReplayCommitLogsToSqlActionTest {
     DateTime now = fakeClock.nowUtc();
     jpaTm().transact(() -> SqlReplayCheckpoint.set(now.minusMinutes(1).minusMillis(1)));
     saveDiffFile(
-        gcsService,
+        gcsUtils,
         createCheckpoint(now.minusMinutes(1)),
         CommitLogManifest.create(
             getBucketKey(1),

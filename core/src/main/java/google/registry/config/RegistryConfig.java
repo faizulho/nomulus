@@ -417,17 +417,6 @@ public final class RegistryConfig {
     }
 
     /**
-     * Returns size of Google Cloud Storage client connection buffer in bytes.
-     *
-     * @see google.registry.gcs.GcsUtils
-     */
-    @Provides
-    @Config("gcsBufferSize")
-    public static int provideGcsBufferSize() {
-      return 1024 * 1024;
-    }
-
-    /**
      * Returns the email address of the admin account on the G Suite app used to perform
      * administrative actions.
      *
@@ -1286,6 +1275,18 @@ public final class RegistryConfig {
     @Config("minimumRsaKeyLength")
     public static int provideMinimumRsaKeyLength(RegistryConfigSettings config) {
       return config.sslCertificateValidation.minimumRsaKeyLength;
+    }
+
+    @Provides
+    @Config("expirationWarningEmailBodyText")
+    public static String provideExpirationWarningEmailBodyText(RegistryConfigSettings config) {
+      return config.sslCertificateValidation.expirationWarningEmailBodyText;
+    }
+
+    @Provides
+    @Config("expirationWarningEmailSubjectText")
+    public static String provideExpirationWarningEmailSubjectText(RegistryConfigSettings config) {
+      return config.sslCertificateValidation.expirationWarningEmailSubjectText;
     }
 
     @Provides
